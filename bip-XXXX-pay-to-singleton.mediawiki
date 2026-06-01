@@ -1,0 +1,278 @@
+<pre>
+  BIP: ???
+  Layer: Consensus (soft fork)
+  Title: Pay-to-Singleton (P2SG)
+  Authors: Joshua Doman <joshsdoman@gmail.com>
+  Status: Draft
+  Type: Specification
+  License: BSD-3-Clause
+  Version: 0.1.0
+  Requires: 340, 341, 342
+</pre>
+
+==Introduction==
+
+=== Abstract ===
+
+This document proposes a new SegWit version 3 output type, Pay-to-Singleton (P2SG), which commits to (1) an identifier that cryptographically proves unique descent from a genesis output and (2) a script tree Merkle root.
+
+=== Copyright ===
+
+This document is licensed under the 3-clause BSD license.
+
+=== Motivation ===
+
+This proposal aims to add singleton identifiers to Bitcoin without using external state or complex recursive covenants in script.
+
+A singleton identifier provides proof that a UTXO uniquely descends from some prior output. This capability eliminates the [https://bitcoinops.org/en/newsletters/2025/01/10/#contract-level-relative-timelocks 2x-delay problem] in LN-Symmetry by enabling [https://delvingbitcoin.org/t/contract-level-relative-timelocks-or-lets-talk-about-ancestry-proofs-and-singletons/1353 contract-level relative timelocks] and provides a foundation for future ZK-rollups, like [https://eprint.iacr.org/2025/068 ShieldedCSV], to support direct onramps without state contention or interactivity.
+
+== Design ==
+
+Pay-to-Singleton (P2SG) is a new output type that commits to a script tree Merkle root and a singleton identifier. It operates with nearly the same functionality as the proposed Pay-to-Merkle-Root (P2MR [[bip-0360.mediawiki|BIP 360]]), except P2SG outputs may not be arbitrarily created. Instead, transaction outputs are restricted so that:
+1. Multiple outputs in the UTXO set cannot commit to the same identifier simultaneously.
+2. An output that commits to the identifier descends directly from all prior outputs committed to the identifier.
+
+The script tree Merkle root is defined as in [[bip-0341.mediawiki|BIP 341]], with each branch hashed with the tag "TapBranch" and each leaf hashed with the tag "TapLeaf."
+
+The identifier commits to the value of the genesis output, the initial script tree Merkle root, and the prevout at the same index in the genesis transaction.<ref>'''How does the identifier provide proof of unique descent from genesis?''' The identifier commits to the prevout at the same index in the genesis transaction to ensure the identifier is cryptographically unique, under the guarantees provided by [[bip-0030.mediawiki|BIP 30]]. The same-index continuation rule ensures that the identifier remains unique in subsequent transactions. The identifier also commits to the initial script tree Merkle root and the initial output value in order to prevent theft via chain reorganizations. If users add funds to an L2, for instance, by committing to its identifier, theft would be possible if the initial conditions of the L2 change via a reorg while the identifier remains the same. For example, fake depositors could be added, the initial balance could be reclaimed, or the unlocking conditions could be changed entirely. Committing to the full set of initial conditions eliminates this attack vector.</ref>
+
+The identifier hash uses a tagged hash as introduced by [[bip-0341.mediawiki|BIP 340]] and [[bip-0341.mediawiki|BIP 341]]. We use a new tag for this purpose: ''SgIdentifier''.
+
+<source>
+p = prevout at same index in the genesis transaction (txid:vout)
+v = initial output value
+r = initial script tree Merkle root
+identifier = tagged_hash("SgIdentifier", p || v || r)
+</source>
+
+The output hash commits to the identifier and the current script tree Merkle root, using the tag ''SgHash'':
+
+<source>
+i = identifier
+r = current script tree Merkle root
+output hash = tagged_hash("SgHash", i || r)
+</source>
+
+When a P2SG output is spent, the identifier may be inherited by at most one output, which must appear at the same index in the transaction.<ref>'''Can multiple P2SG outputs inherit the same identifier?''' No, to inherit an identifier, the new P2SG output must spend the old P2SG output at the same index. This prohibits multiple outputs from inheriting the same identifier.</ref> A P2SG output created via inheritance is called a "continuation" whereas one created without inheritance is called a "genesis" output.
+
+Unlike other output types, creating a P2SG output without proof of genesis or continuation is forbidden:
+* To provide proof of genesis, an annex must be present at the same index that publishes the initial script tree Merkle root. This proves that the genesis output commits to the derived identifier.<ref>'''Why is the annex used to prove genesis is valid?''' The annex is used for genesis because Segwit [[bip-0141.mediawiki|BIP 141]] does not support witness programs greater than 40 bytes and two 20-byte hashes would provide insufficient security. Moreover, we do not need to hold on to the 32-byte proof that genesis is valid after the P2SG output has been created, so storing this data in the output would not be appropriate. The primary limitation is the inability to create a new genesis P2SG output without a corresponding input. To the extent that creating many P2SG outputs is necessary, this can be achieved with a package of two transactions, where the first creates the necessary inputs and the second creates the outputs. A proper alternative would require a new version of Segwit that has an output witness field, which would be quite invasive and hard to justify. While an <code>OP_RETURN</code> could be used, doing so breaks isolation and loses the witness discount.</ref>
+
+* To provide proof of continuation, the last bit in the control byte is set to 1, and the last element after removing the script and control block publishes the next script tree Merkle root. This proves that the continuation output commits to the same identifier.
+
+A genesis annex is defined as any last witness element that begins with <code>0x50 0x01</code> and contains at least 34 bytes. This covers P2TR and P2SG annexes and annexes in other proposed witness programs, such as P2MR:
+
+<source>
+0x50 0x01 [script tree Merkle root] (additional bytes are ignored)
+</source>
+
+A genesis annex renders a transaction invalid if a P2SG output is present at the same index and the output does not commit to the derived identifier.<ref>'''Why does an invalid genesis annex render the transaction invalid?''' Invalidating the transaction if there exists a P2SG output with an invalid genesis annex discourages use of the genesis annex to publish arbitrary data.</ref>
+
+When spending a P2SG input:
+* A witness is provided that resembles a P2TR script-path spend with the internal key in the control block replaced with the singleton identifier.
+* Continuation is indicated by the last bit of the first byte of the control block, which must be 1 if a continuation and 0 if not.
+* If the continuation is non-identical, the last element after removing the control block and script must publish the next script tree Merkle root.
+
+To illustrate, a P2SG witness provides the following:
+
+<source>
+initial stack element 0,
+...,
+initial stack element N,
+next script tree Merkle root, # if a non-identical continuation
+leaf script,
+control block = [control byte, identifier, 32*m byte Merkle path] # m is the depth of the script in the Merkle tree
+</source>
+
+The initial stack elements follow the same rules as P2TR script path spends.<ref>'''Why does P2SG follow nearly the same rules as P2TR script path spends?''' P2SG leverages the battle tested tapleaf and tapscript code already in Bitcoin in order to minimize complexity and implementation risk.</ref>
+That is, they place elements on the stack to be evaluated by the leaf script.
+
+The control block is a ''33 + 32 * m'' byte array, where the first byte is the control byte and the next ''32 * m'' bytes are the Merkle path to the leaf script. The control byte is the same as the control byte in a P2TR control block with respect to the 7 bits which are used to specify the leaf version. The lowest bit of the control byte, however, must be 1 if the spend is a continuation and 0 if not. P2SG maintains support for the optional annex in the witness (see Specification section below for more details).
+
+The spent P2SG output hash must match the hash of the identifier and the spent script tree Merkle root.
+
+If a non-identical continuation, the next P2SG output hash at the same index must match the hash derived using the identifier and the next script tree Merkle root.
+
+If an identical continuation, the next P2SG output hash must match the spent P2SG output hash. In this case, the next script tree Merkle root is not provided in the witness.
+
+== Specification ==
+
+This section specifies Pay-to-Singleton (P2SG) consensus rules. Validity is defined by exclusion: a block or transaction is valid if no condition exists that marks it failed.
+
+The notation below follows that of [[bip-0341.mediawiki#design|BIP341]].
+
+=== Address Format ===
+
+P2SG outputs use SegWit version 3.<ref>'''Why do P2SG outputs use Segwit version 3?''' P2SG outputs use Segwit version 3 to respect [[bip-0360.mediawiki|BIP 360]], which uses version 2.</ref> This results in mainnet addresses that start with <code>bc1r</code>, following [[bip-0173.mediawiki|BIP 173]]. Bech32m encoding maps version 3 to the prefix <code>z</code>.
+
+Example P2SG address:
+
+<source>
+bc1rzmv50jjgxxhww6ve4g5zpewrkjqhr06fyujpm20tuezdlxmfphcqfc80ve
+</source>
+
+This commits to a 32-byte hash.
+
+=== ScriptPubKey ===
+
+The <code>scriptPubKey</code> for a P2SG output is:
+
+<source>
+OP_3 OP_PUSHBYTES_32 <hash>
+</source>
+
+Where:
+* <code>OP_3</code> indicates SegWit version 3.
+* <code><hash></code> is the 32-byte output hash.
+
+=== Script Validation ===
+
+A P2SG output is a native SegWit output (see [[bip-0141.mediawiki|BIP 141]]) with version 3 and a 32-byte witness program. For the sake of comparison, the language is copied verbatim as much as possible from the script validation section of [[bip-0341.mediawiki|BIP 341]].
+
+* Let ''q'' be the 32-byte array containing the witness program (the second push in the scriptPubKey) which represents the output hash.
+* Fail if the witness stack does not have one or more elements.
+* If there are at least two witness elements, and the first byte of the last element is 0x50, this last element is called ''annex a'' and is removed from the witness stack. The annex (or the lack thereof) is always covered by the signature and contributes to transaction weight.
+* There must be at least two witness elements left.
+** Call the second-to-last stack element ''s'', the script (as defined in [[bip-0341.mediawiki|BIP 341]]).
+** The last stack element is called the control block ''c'', and must have length ''33 + 32 * m'', for a value of ''m'' that is an integer between 0 and 128, inclusive. Fail if it does not have such a length.
+** Let ''i = c[1:33]'' be the ''identifier''.
+** Let ''v = c[0] & 0xfe'' be the ''leaf version'' (as defined in [[bip-0341.mediawiki|BIP 341]]).
+** Let ''k<sub>0</sub> = hash<sub>TapLeaf</sub>(v || compact_size(size of s) || s)''; also call it the ''tapleaf hash''.
+** For ''j'' in ''[0,1,...,m-1]'':
+*** Let ''e<sub>j</sub> = c[33+32j:65+32j]''.
+*** Let ''k<sub>j+1</sub>'' depend on whether ''k<sub>j</sub> < e<sub>j</sub>'' (lexicographically):
+**** If ''k<sub>j</sub> < e<sub>j</sub>'': ''k<sub>j+1</sub> = hash<sub>TapBranch</sub>(k<sub>j</sub> || e<sub>j</sub>)''.
+**** If ''k<sub>j</sub> &ge; e<sub>j</sub>'': ''k<sub>j+1</sub> = hash<sub>TapBranch</sub>(e<sub>j</sub> || k<sub>j</sub>)''.
+** Let ''r<sub>0</sub> = k<sub>m</sub>''.
+** Let ''h<sub>0</sub> = hash<sub>SgHash</sub>(i || r<sub>0</sub>)''.
+** If ''q &ne; h<sub>0</sub>'', fail.
+** If ''c[0] & 0x01 = 1'' and there is not an identical witness program at the same output index:
+*** There must be at least one witness element left, after removing ''s'' and ''c''.
+*** Call the last stack element ''r<sub>1</sub>'', the next script tree Merkle root. Fail if it does not have length 32.
+*** Let ''h<sub>1</sub> = hash<sub>SgHash</sub>(i || r<sub>1</sub>)''.
+*** Fail if there is no version 3 Segwit output at the same index with output hash ''h<sub>1</sub>''.
+** Execute the script, according to the script rules specified in BIP 342, using the remaining witness stack elements excluding the script ''s'', the control block ''c'', and the annex ''a'' and next Merkle root ''r<sub>1</sub>'' if present, as initial stack. This implies that for future leaf versions (non-''0xC0'') the execution must succeed.
+
+=== Output Validation ===
+
+Unlike other output types, a P2SG output may not be freely created. Each version 3 Segwit output with a 32-byte program created above the activation height must meet the following conditions:
+
+* Let ''q'' be the 32-byte array containing the witness program which represents the output hash.
+* Let ''n'' be the output index. Fail if an input does not exist at index ''n''.
+* Let ''w'' be the witness stack of input ''n''.
+* If ''w'' is non-empty and the first byte of the last element is 0x50, this last element is called ''annex a'' and is removed from the witness stack.
+* If ''a'' is at least 34 bytes AND ''a[1] = 0x01'':<ref>'''Why is the genesis annex allowed to exceed 34 bytes?''' Restricting the genesis annex to exactly 34 bytes would preclude additional usage of the annex in future extensions. Until the meaning of subsequent bytes is defined by another softfork, users SHOULD NOT include in transactions a genesis annex exceeding 34 bytes, or it may lead to PERMANENT FUND LOSS.</ref><ref>'''Why is the second byte in the genesis annex <code>0x01</code>?''' The tag <code>0x01</code> in the genesis annex provides domain separation for future extensions that also use the annex. <code>0x01</code> is chosen to respect Peter Todd's [https://groups.google.com/g/bitcoindev/c/Q5j2Kb6XeHI proposed] use of <code>0x00</code> for applications that need data availability, such as Lightning Symmetry.</ref>
+** Let ''p'' be the prevout of input ''n''.
+** Let ''v'' be the value of output ''n''.
+** Call ''m = a[2:34]'' the script tree Merkle root.
+** Let ''i = hash<sub>SgIdentifier</sub>(p || v || m)'' be the identifier.
+** Let ''h = hash<sub>SgHash</sub>(i || m)''.
+** If ''q = h'', succeed. Otherwise, fail.
+* If the input at index ''n'' spends a version 3 Segwit output with a 32-byte program:
+** There must be at least one witness element left.
+** The last stack element is called the control block ''c'' and must be non-empty.
+** If ''c[0] & 0x01 = 1'', succeed.
+* Fail if execution has not succeeded.
+
+=== Common Signature Message Construction ===
+
+The [https://learnmeabitcoin.com/technical/upgrades/taproot/#common-signature-message common signature message] construction for P2SG outputs is exactly the same procedure as defined in [[bip-0342.mediawiki#user-content-Common_Signature_Message_Extension|BIP342 Common Signature Message]].
+
+=== Compatibility with BIP 141 ===
+
+By adhering to the SegWit transaction structure and versioning, P2SG outputs are compatible with existing transaction processing rules. Nodes that do not recognize SegWit version 3 will treat these outputs as anyone-can-spend but generally will not relay or mine such transactions.
+
+== Performance Impact ==
+
+A P2SG spend is as performant as a P2TR script path spend, as the operations to spend a P2SG output are nearly identical, with a tagged hash replacing the tweak to the internal key.
+
+Unlike P2TR, creating a new P2SG output requires an additional hash of constant size. This cost is negligible, however, and accounted for by the additional bytes in the witness.
+
+== Security ==
+
+P2SG outputs provide the same tapscript functionality as P2TR outputs. As the output hash is 32 bytes, P2SG also provides 128 bits of collision resistance and 256 bits of preimage resistance.
+
+In addition, the identifier is carefully designed to mitigate the risk of loss of funds due to a chain reorganization. If, for instance, an L2 identifier merely committed to the genesis prevout, a bad actor could reorg the chain and change the unlocking conditions, stealing the funds of users whose deposits would remain valid. Likewise, if the script tree were committed to but not the initial output value, a bad actor could reorg the chain to reduce the initial value while leaving the initial set of depositors intact, allowing those depositors to steal user funds.
+
+By committing to the entire set of initial conditions, we avoid this class of attacks and ensure that L2 behavior is predictable given an identifier.
+
+== Implementation ==
+
+See [https://github.com/joshdoman/bitcoin/tree/202604-pay-to-singleton].
+
+== Test vectors ==
+
+TODO
+
+== Rationale ==
+
+<references />
+
+== Backward Compatibility ==
+
+Older wallets and nodes that have not been made compatible with SegWit version 3 and P2SG will not understand these outputs. Per [[bip-0350.mediawiki|BIP 350]] older wallets are able to spend funds to SegWit version 3 outputs in a PSBT transaction, but an upgraded wallet will be needed to complete the transaction.
+
+Users should ensure they are using updated wallets and nodes to receive P2SG outputs and validate transactions using P2SG outputs. P2SG is fully compatible with tapscript and existing tapscript programs can be used in P2SG outputs without modification. P2SG can also support future scripts with new leaf versions.
+
+== Applications ==
+
+=== Lightning Symmetry ===
+
+==== Eliminating the 2x-Delay ====
+
+Lightning Symmetry (LN-Symmetry) suffers from the [https://bitcoinops.org/en/newsletters/2025/01/10/#contract-level-relative-timelocks 2x-delay problem], caused by the relative timelock of the settlement transaction being reset each time an update transaction is confirmed on-chain. This doubles the timelock in HTLCs, reducing the available liquidity and the attractiveness of LN-Symmetry over existing alternatives.
+
+P2SG outputs solve this problem by enabling a contract-level relative timelock at settlement using Greg Sanders' [https://delvingbitcoin.org/t/contract-level-relative-timelocks-or-lets-talk-about-ancestry-proofs-and-singletons/1353 proposed] <code>funding->kickoff->update->settle</code> architecture. With P2SG, this can be achieved solely using opcodes already in consideration for LN-Symmetry (such as <code>OP_CSFS</code> [[bip-0348.md|BIP 348]] and <code>OP_TEMPLATEHASH</code> [[bip-0446.md|BIP 446]]).
+
+The primary change over standard LN-Symmetry is the inclusion of a kickoff transaction, which includes two outputs, a P2SG output to hold the channel funds for the update path and a P2TR (or P2MR) dust output that acts as a contract-level relative timelock and cannot be spent except alongside a singleton with an identifier matching the first. The settlement transaction concludes the channel by consuming the singleton and the timelock simultaneously, thereby enforcing a contract-level relative timelock.
+
+<pre>
+  [ FUNDING TX ]
+         │
+         ▼
+  [ KICKOFF TX ]
+  ├── OUTPUT 0: P2SG (Update Path Funds)
+  └── OUTPUT 1: P2TR (Timelock)
+         │               │
+         ▼               │
+  [ UPDATE TX 1 ]        │
+         │               │
+         ▼               │
+  [ UPDATE TX N ]        │ (Consumes Timelock)
+         │               ▼
+         │        [ SETTLEMENT TX ]
+         └──────▶ (Input 0: Update N Output 0)
+                  (Input 1: Kickoff Output 1)
+</pre>
+
+Sibling commitments can be emulated by committing to zero-value anyone-can-spend outputs that enforce either genesis or continuation. For instance, the settlement transaction can include a zero-value anyone-can-spend P2SG output that continues the singleton created by the kickoff transaction and another that commits via genesis to an input spending the timelock. Each input can then commit to the presence of the other using <code>OP_TEMPLATEHASH</code> or <code>SIGHASH_ALL|ANYONECANPAY</code>, respectively.
+
+Though out-of-scope for this BIP, we can eliminate these P2SG outputs with two additional capabilities:
+1. The ability to push the identifier of a spent singleton at a specific index.
+2. The ability to push a modified <code>OP_TEMPLATEHASH</code> that commits to the prevout at the next index, if present.
+
+With the former, the timelock output approves any transaction that consumes the singleton at input 0, provided the relative timelock is satisfied. With the latter, the settlement hash commits directly to the timelock being consumed at input 1, and update transactions are precluded from spending the timelock prematurely.
+
+(1) can be safely used without (2), but the protocol must reverse the order of the two inputs in the settlement transaction.
+
+=== ZK-Rollups ===
+
+P2SG also provides a foundation for future zero-knowledge rollups, like [https://eprint.iacr.org/2025/068 ShieldedCSV], to support non-interactive bridging.
+
+By creating an identifier that is unique to the L2 and independent of state, P2SG enables a future upgrade that allows users to condition spends on the presence of the L2 in the transaction. This would require a capability that is out-of-scope for this BIP, but for the purpose of illustrating the architectural benefits of P2SG, we will assume this capability exists. The key idea is that by delegating their UTXO to the singleton, a user can safely make a deposit directly to the L2 without state contention or interactivity.
+
+To the extent necessary, users would also commit to deposit conditions, such as the amount and receive address, in a manner the singleton is forced to respect. This might be via the annex, an output commitment, an adaptor signature, or an alternative.
+
+After signing, users would broadcast their deposits over a dedicated public network, and transaction builders would aggregate pending deposits and compete to produce transactions with valid proofs, capturing a portion of the total fee. Completed transactions would then be broadcast and added to the public mempool. Alternatively, users might scan their local mempool for transactions interacting with the L2 and append their deposit directly via RBF, generating the new proof locally.
+
+== Related Work ==
+
+The singleton concept has been discussed a number of times in the Bitcoin community. For instance, [https://delvingbitcoin.org/t/contract-level-relative-timelocks-or-lets-talk-about-ancestry-proofs-and-singletons/1353 this Delving thread] discusses the use of ancestor proofs to enforce contract-level relative timelocks in Lightning Symmetry. Participants discuss the challenges of implementing this capability, suggesting the use of opcodes like <code>OP_CAT</code> [[bip-0347.mediawiki|BIP 347]] to implement recursive covenants that validate the parent and grandparent transactions, an idea previously discussed [https://gnusha.org/pi/bitcoindev/20220310064717.GA7597@erisian.com.au/ on the mailing list].
+
+While recursive introspection is a viable way to enforce singleton behavior, it has several drawbacks over P2SG's approach. For one, it is considerably more expensive to implement, requiring a large witness, complex script, and new introspection opcodes. The approach also imposes an asymmetric cost on users, where the amortized cost of interacting with the singleton could rise considerably if the parent or grandparent transactions have many more inputs or outputs than usual. The only conceivable way to eliminate this asymmetry is with a zero-knowledge proof, which adds considerable cost and complexity. Finally, a script-based approach makes it more challenging to implement standardized introspection of the singleton identifier.
+
+[https://github.com/JohnLaw2/btc-iids/blob/main/iids14.pdf Inherited IDs] is another proposal that offers ancestor-proof capabilities. Unlike P2SG, however, the Inherited ID proposal requires nodes to store additional state outside the UTXO set and lacks support for stable identifiers.
+
+== Acknowledgements ==
+
+This document is inspired by [[bip-0341.mediawiki|BIP 341]], which introduced the design of the P2TR (Taproot) output type using Schnorr signatures, and by [[bip-0360.mediawiki|BIP 360]], which proposed the P2MR (Pay-to-Merkle-Root) output type. It is motivated in part by Greg Sanders' work on contract-level relative timelocks to solve the 2x-delay problem in Lightning Symmetry.
