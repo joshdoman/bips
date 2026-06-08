@@ -17,7 +17,7 @@ This document proposes a new operation for [Tapscript][tapscript-bip]: `OP_SINGL
 
 `OP_SINGLETON` can be used to commit to the transaction spending a [Singleton][singleton-bip] output with a specific identifier. This capability can be used to create a signature-less [contract-level relative timelock][clrt], which [improves a variant][ln-symmetry-variant] of LN-Symmetry that uses Singleton outputs to eliminate the [2x-delay problem][2x-delay-problem].
 
-In addition, `OP_SINGLETON` can be used alongside `OP_CSFS` [BIP348][csfs-bip] to delegate to a Singleton without specifying the current UTXO. This improves the architecture of rollup proposals like [ShieldedCSV][shielded-csv] by enabling users to non-interactively add funds [through delegation][rollup-delegation].
+In addition, `OP_SINGLETON` can be used alongside `OP_CSFS` [BIP348][csfs-bip] to delegate to a Singleton without specifying the current UTXO. This improves the architecture of rollup proposals like [ShieldedCSV][shielded-csv] by enabling users to non-interactively add funds [through delegation][bridging].
 
 ## Specification
 
@@ -61,6 +61,6 @@ This document is licensed under the 3-clause BSD license.
 [2x-delay-problem]: https://bitcoinops.org/en/newsletters/2025/01/10/#contract-level-relative-timelocks
 [csfs-bip]: bip-0348.md
 [shielded-csv]: https://eprint.iacr.org/2025/068
-[rollup-delegation]: bip-XXXX-pay-to-singleton.mediawiki#rollup-delegation
+[bridging]: bip-XXXX-pay-to-singleton.mediawiki#non-interactive-bridging
 [bip-349]: bip-0349.md
 [bip-446]: bip-0446.md

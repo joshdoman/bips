@@ -21,26 +21,28 @@ This document is licensed under the 3-clause BSD license.
 
 === Motivation ===
 
-This proposal aims to add singleton identifiers to Bitcoin without using external state or complex recursive covenants in script.
+This proposal aims to enable the singleton pattern on Bitcoin without requiring nodes to validate external state or execute complex recursive covenants in script.
 
-A singleton identifier provides proof that a UTXO uniquely descends from some prior output. This capability eliminates the [https://bitcoinops.org/en/newsletters/2025/01/10/#contract-level-relative-timelocks 2x-delay problem] in LN-Symmetry by enabling [https://delvingbitcoin.org/t/contract-level-relative-timelocks-or-lets-talk-about-ancestry-proofs-and-singletons/1353 contract-level relative timelocks] and creates an architecture for future rollups, like [https://eprint.iacr.org/2025/068 ShieldedCSV], to support direct on-ramps without state contention or interactivity.
+The singleton pattern entails an unbroken lineage of UTXOs descending from a genesis output, which can be inherited by at most one output per transaction. Proving this lineage efficiently is a challenge. Existing proposals require either external state (see [https://github.com/JohnLaw2/btc-iids/blob/main/iids14.pdf Inherited IDs]) or [https://gnusha.org/pi/bitcoindev/20220310064717.GA7597@erisian.com.au/ recursive introspection in script].
 
-This proposal is designed to be deployed alongside [[bip-XXXX-op-singleton.md|OP_SINGLETON]], which exposes the singleton identifier in script via cross-input introspection.
+This proposal, in contrast, requires no external state, and the cost to validate descent is strictly O(1), regardless of ancestor size. This is achieved through a new output type that commits to a singleton identifier, which cryptographically proves unique descent from a genesis output.
+
+This capability eliminates the [https://bitcoinops.org/en/newsletters/2025/01/10/#contract-level-relative-timelocks 2x-delay problem] in LN-Symmetry by enabling [https://delvingbitcoin.org/t/contract-level-relative-timelocks-or-lets-talk-about-ancestry-proofs-and-singletons/1353 contract-level relative timelocks]. In addition, it enables non-interactive bridging in future rollups like [https://eprint.iacr.org/2025/068 ShieldedCSV], avoiding HTLC swaps through conditional delegation.
+
+To facilitate usage, a companion proposal [[bip-XXXX-op-singleton.md|OP_SINGLETON]] has been prepared, which exposes the identifier in script via cross-input introspection.
 
 == Design ==
 
-Pay-to-Singleton (P2SG) is a new output type that commits to a script tree Merkle root and a singleton identifier. It operates with nearly the same functionality as [[bip-0341.mediawiki|Pay-to-Taproot]] (P2TR), except there is no key-path spend and Singleton outputs may not be arbitrarily created.<ref>'''Why is there no key-path spend?''' Unlike P2TR, P2SG is intended for complex L2 applications, which almost always need advanced scripting capabilities. In LN-Symmetry, for instance, cooperative closures remain P2TR spends (for privacy reasons). Adding an infrequently used key-path spend option would therefore introduce unnecessary complexity while increasing validation costs and the size of the typical witness.</ref> Instead, transactions must provide cryptographic proof that two invariants hold:
-1. Multiple outputs in the UTXO set cannot commit to the same identifier simultaneously.
-2. An output that commits to the identifier descends immediately from all prior outputs committed to the identifier.
+Pay-to-Singleton (P2SG) is a new output type that commits to a script tree Merkle root and a singleton identifier. It operates with nearly the same functionality as [[bip-0341.mediawiki|Pay-to-Taproot]] (P2TR), except there is no key-path spend and transactions may only create Singleton outputs when the following identifier invariants are provably preserved:<ref>'''Why is there no key-path spend?''' Unlike P2TR, P2SG is intended for complex L2 applications, which almost always need advanced scripting capabilities. In LN-Symmetry, for instance, cooperative closures remain P2TR spends (for privacy reasons). Adding an infrequently used key-path spend option would therefore introduce unnecessary complexity while increasing validation costs and the size of the typical witness.</ref>
+* Multiple outputs in the UTXO set cannot commit to the same identifier simultaneously.
+* An output that commits to an existing identifier spends its immediate predecessor.
 
-The script tree Merkle root is defined as in [[bip-0341.mediawiki|BIP 341]], with each branch hashed with the tag "TapBranch" and each leaf hashed with the tag "TapLeaf."
+To achieve this, the identifier commits to the value of the genesis output, the genesis output index, the initial script tree Merkle root, and the first prevout in the genesis transaction, which may not be a coinbase.<ref>'''How does the identifier provide proof of unique descent from genesis?''' In the genesis transaction, the identifier commits to the first prevout and the output index to ensure the identifier is cryptographically unique. The uniqueness of the first prevout is guaranteed by [[bip-0030.mediawiki|BIP 30]] and [[bip-0034.mediawiki|BIP 34]] and by forbidding coinbase genesis transactions, and the same-index continuation rule ensures that the identifier remains unique in subsequent transactions.</ref><ref>'''Why does the identifier commit to the initial script tree Merkle root and output value?''' The identifier commits to the initial script tree Merkle root and output value in order to prevent theft via chain reorganizations. If users add funds to an L2, for instance, by committing to its identifier, theft would be possible if the initial conditions of the L2 could change via a reorg while the identifier remains the same. For example, fake depositors could be added, the initial balance could be reclaimed, or the unlocking conditions could be changed entirely. Committing to the full set of initial conditions eliminates this attack vector.</ref>
 
-The identifier commits to the value of the genesis output, the genesis output index, the initial script tree Merkle root, and the first prevout in the genesis transaction, which may not be a coinbase.<ref>'''How does the identifier provide proof of unique descent from genesis?''' In the genesis transaction, the identifier commits to the first prevout and the output index to ensure the identifier is cryptographically unique. The uniqueness of the first prevout is guaranteed by [[bip-0030.mediawiki|BIP 30]] and [[bip-0034.mediawiki|BIP 34]] and by forbidding coinbase genesis transactions, and the same-index continuation rule ensures that the identifier remains unique in subsequent transactions.</ref><ref>'''Why does the identifier commit to the initial script tree Merkle root and output value?''' The identifier commits to the initial script tree Merkle root and output value in order to prevent theft via chain reorganizations. If users add funds to an L2, for instance, by committing to its identifier, theft would be possible if the initial conditions of the L2 could change via a reorg while the identifier remains the same. For example, fake depositors could be added, the initial balance could be reclaimed, or the unlocking conditions could be changed entirely. Committing to the full set of initial conditions eliminates this attack vector.</ref>
-
-The identifier commitment uses a tagged hash as introduced by [[bip-0340.mediawiki|BIP 340]] and [[bip-0341.mediawiki|BIP 341]]. We use a new tag for this purpose: ''SingletonIdentifier'':
+The identifier commitment uses a tagged hash as introduced by [[bip-0340.mediawiki|BIP 340]] and [[bip-0341.mediawiki|BIP 341]], using the tag ''SingletonIdentifier'':
 
 <source>
-p = prevout of the first input in the genesis transaction (36-byte, serialized txid:vout)
+p = prevout of the first input in the genesis transaction (32-byte hash + 4-byte little-endian)
 n = output index (4-byte, little endian)
 v = initial output value (8-byte, little endian)
 r = initial script tree Merkle root (32-byte)
@@ -55,12 +57,14 @@ r = current script tree Merkle root (32-byte)
 output hash = tagged_hash("SingletonHash", i || r)
 </source>
 
+The script tree Merkle root is defined as in [[bip-0341.mediawiki|BIP 341]], with each branch hashed with the tag "TapBranch" and each leaf hashed with the tag "TapLeaf."
+
 When a Singleton output is spent, the identifier may be inherited by at most one output, which must appear at the same index in the transaction. A Singleton output created via inheritance is called a "continuation," whereas one created without inheritance is called a "genesis."
 
-Unlike other output types, creating a Singleton output without proof of genesis or continuation is forbidden:
-* To provide proof of genesis, the transaction must not be a coinbase and the next output must be an <code>OP_RETURN</code> that publishes the initial script tree Merkle root, proving that the genesis output commits to the derived identifier.<ref>'''Why can the genesis transaction not be a coinbase?''' The singleton identifier derives entropy from the prevout at the first index, which is not unique in coinbase transactions. While adding support for coinbase transactions is possible, it is not worth the implementation complexity given the lack of a compelling use case.</ref><ref>'''Why is an <code>OP_RETURN</code> output used to prove genesis is valid?''' The <code>OP_RETURN</code> is used for genesis because SegWit [[bip-0141.mediawiki|BIP 141]] does not support witness programs greater than 40 bytes and two 20-byte hashes would provide insufficient security. Moreover, nodes do not need to store the 32-byte proof that genesis is valid after the Singleton output has been created, so storing this data in the output scriptPubKey would not be appropriate. A proper alternative would require a new version of SegWit that has an output witness field, but this would be quite invasive and hard to justify. While an annex could be used instead, annex usage has not been standardized, and a version 1+ SegWit input would be required to create a genesis Singleton output.</ref><ref>'''Why must the genesis <code>OP_RETURN</code> immediately follow the genesis output?''' The genesis <code>OP_RETURN</code> immediately follows the genesis output so that output validation is O(1) and the specification is unambiguous and straightforward to implement. While an alternative could combine all genesis Merkle roots into a single tagged <code>OP_RETURN</code> that could be anywhere in the transaction, this would require careful attention to how data is encoded and add considerable complexity for little gain.</ref>
+Transactions are forbidden from creating a Singleton output without proof of genesis or continuation:
+* To provide proof of genesis, the transaction must not be a coinbase and the next output must be an <code>OP_RETURN</code> that publishes the initial script tree Merkle root, proving that the genesis output commits to the derived identifier.<ref>'''Why can the genesis transaction not be a coinbase?''' The singleton identifier derives entropy from the prevout at the first index, which is not unique in coinbase transactions. While adding support for coinbase transactions is possible, it is not worth the implementation complexity given the lack of a compelling use case.</ref><ref>'''Why is an <code>OP_RETURN</code> used to publish the initial script tree Merkle root?''' The cleanest alternative would be a new SegWit version with an output witness field, but this is invasive and hard to justify. Within existing SegWit, the <code>OP_RETURN</code> is necessary because [[bip-0141.mediawiki|BIP 141]] caps witness programs at 40 bytes and two 20-byte hashes provide insufficient security. An annex could in principle be used (e.g., by looking for a tagged annex at the same index), but an <code>OP_RETURN</code> fallback would still be necessary for transactions without a v1+ Segwit input. Given this, in an effort to minimize complexity, an <code>OP_RETURN</code>-only solution is considered the best option.</ref><ref>'''Why must the genesis <code>OP_RETURN</code> immediately follow the genesis output?''' The genesis <code>OP_RETURN</code> immediately follows the genesis output so that output validation is O(1), parallelizable, and straightforward to implement. In contrast, combining all genesis <code>OP_RETURN</code> data into a single <code>OP_RETURN</code> would make it hard to validate outputs in isolation and would yield limited cost savings. Under the conservative assumption that genesis Singleton outputs will be rare and occur at most once in a transaction, choosing the simplest approach is preferable.</ref>
 
-* To provide proof of continuation, the last bit in the control byte must be set to 1, and the third-to-last witness element after removing the optional annex must publish the next script tree Merkle root. This proves that the continuation output, which must appear at the same index, commits to the same identifier.<ref>'''Why must the continuation output appear at the same index?''' The same-index continuation rule ensures that output validation is O(1) and multiple outputs cannot inherit the same identifier. The rule was chosen for its simplicity and ease of implementation. Providing more flexibility would add complexity to output validation for little real gain.</ref>
+* To provide proof of continuation, the lowest bit in the control byte must be set to 1, and the third-to-last witness element after removing the optional annex must publish the next script tree Merkle root. This proves that the continuation output, which must appear at the same index, commits to the same identifier.<ref>'''Why must a continuation output appear at the same index?''' The same-index continuation rule ensures that output validation is O(1) and multiple outputs cannot inherit the same identifier. The rule was chosen for its simplicity and ease of implementation. Providing more flexibility would add complexity to output validation for little real gain.</ref>
 
 A genesis <code>OP_RETURN</code> is 34 bytes and begins with a 32-byte data push:
 
@@ -77,7 +81,7 @@ Output N+1: Genesis OP_RETURN
 
 When spending a Singleton input:
 * A witness is provided that resembles a P2TR script-path spend, except the internal key in the control block is replaced with the Singleton identifier.
-* Continuation is indicated by the last bit of the first byte of the control block, which must be 1 if a continuation and 0 if not.<ref>'''What is the purpose of the continuation bit?''' The continuation bit signals the presence of the next script tree Merkle root in the witness, which must be removed from the witness stack prior to script evaluation. The continuation bit also signals whether the output at the same index is a continuation. This is useful during output validation to quickly identify genesis outputs.</ref>
+* Continuation is indicated by the lowest bit of the first byte of the control block, which must be 1 if a continuation and 0 if not.<ref>'''What is the purpose of the continuation bit?''' The continuation bit signals the presence of the next script tree Merkle root in the witness, which must be removed from the witness stack prior to script evaluation. The continuation bit also signals whether the output at the same index is a continuation. This is useful during output validation to quickly identify genesis outputs.</ref>
 * If the continuation bit is set, the third-to-last witness element after removing the optional annex must publish the next script tree Merkle root.<ref>'''Why is the next script tree Merkle root not published in the control block?''' In a continuation, the next script tree Merkle root is published in the third-to-last witness element after removing the optional annex. An alternative is to publish the 32-byte next script tree Merkle root in the control block if the continuation bit is set, saving 0.25 vbytes. We choose to forgo this small saving to minimize complexity and simplify reuse of [[bip-0341.mediawiki|BIP341]] validation logic, as the control block is otherwise nearly identical.</ref>
 
 To illustrate, a Singleton witness provides the following:
@@ -170,13 +174,11 @@ Unlike other output types, a Singleton output may not be freely created. A versi
 ** If ''c'' is non-empty and ''c[0] & 0x01 = 1'', succeed.
 * Fail if the transaction is a coinbase or the output is last in the transaction.
 * Let ''s'' be the scriptPubKey of the next output. ''s'' must be 34 bytes and the first byte must be ''OP_RETURN'' and the second byte must be ''0x20''.
+* Let ''p'' be the <code>COutPoint</code> of the first input (32-byte hash + 4-byte little-endian).
+* Let ''n'' be the output index (4-byte little endian).
+* Let ''v'' be the value of output ''n'' (8-byte little endian).
 * Call ''r = s[2:34]'' the initial script tree Merkle root.
-* Let ''p'' be the prevout of the first input in the transaction.
-* Let ''n'' be the output index.
-* Let ''v'' be the value of output ''n''.
 * Let ''i = hash<sub>SingletonIdentifier</sub>(p || n || v || r)'' be the identifier.
-** ''p'' is encoded as <code>txid:vout</code> (36-byte), where txid is consensus-encoded and vout is encoded in little-endian.
-** ''n'' and ''v'' are encoded in little-endian as 4-byte and 8-byte, respectively.
 * Let ''h = hash<sub>SingletonHash</sub>(i || r)''.
 * Fail if ''q &ne; h''.
 
@@ -190,11 +192,9 @@ By adhering to the SegWit transaction structure and versioning, Singleton output
 
 == Performance Impact ==
 
-A Singleton spend is as performant as a Taproot script path spend, as the operations to spend a Singleton output are identical, except a tagged hash replaces the tweak to the internal key.
+A Singleton spend is as performant as a Taproot script path spend, as the operations to spend a Singleton output are identical, except a tagged hash replaces the tweak to the internal key, and there is an additional tagged hash if the spend is a continuation.
 
-Unlike P2TR, creating a fresh Singleton output requires two additional tagged hashes of constant size, while a continuation requires one. This cost is negligible, however, and it is accounted for by the weight of the script tree Merkle root, which is published in either an <code>OP_RETURN</code> or the witness.
-
-Output validation is the most significant change to block validation, requiring that each output in a transaction be checked to determine if it is a Singleton output. This is extremely fast, however, and can be fully parallelized if necessary.
+Output validation is the most significant change to block validation, as each transaction output must be checked to determine if it is a genesis Singleton output. While this check is fast and parallelizable, benchmarking has not yet been performed.
 
 == Security ==
 
@@ -258,19 +258,23 @@ The settlement transaction concludes the channel by consuming the Singleton and 
                   (Input 1: Update N P2SG Output)
 </pre>
 
-Sibling commitments can be emulated by committing to zero-value anyone-can-spend outputs that enforce either genesis or continuation. For instance, the settlement transaction could include a Singleton output that continues the Singleton created in the kickoff transaction and a genesis Singleton output whose identifier commits to the timelock being spent in the first input (followed by the necessary <code>OP_RETURN</code>). In this manner, a presigned transaction can commit to both inputs solely by committing to the outputs of the settlement transaction.
+Sibling commitments can be emulated by committing to zero-value anyone-can-spend outputs that enforce either genesis or continuation. For instance, the settlement transaction could include:
+* A Singleton output that continues the Singleton created in the kickoff transaction
+* A genesis Singleton output whose identifier commits to the timelock being spent in the first input (followed by the necessary <code>OP_RETURN</code>).
 
-While functional, this approach is inefficient and intended purely for demonstration purposes. In practice, the timelock would use [[bip-XXXX-op-singleton.mediawiki|OP_SINGLETON]] to require that the Singleton output holding the channel funds be spent at input index 1. This would make the timelock signature-less, eliminate the first Singleton output in the settlement transaction, and preclude inclusion in an update transaction. Eliminating the second Singleton output, however, would require a modification to [[bip-0446.md|OP_TEMPLATEHASH]] or a new opcode that allows the settlement hash to commit to a sibling prevout.
+In this manner, a presigned transaction can commit to both inputs solely by committing to the outputs of the settlement transaction.
 
-Finally, note that a Singleton output is not used in the funding transaction. This keeps channels indistinguishable from other Taproot outputs when cooperatively closed.
+While functional, this approach is inefficient and can be improved using [[bip-XXXX-op-singleton.md|OP_SINGLETON]] in the timelock output, which commits to the channel Singleton being consumed at input index 1. This makes the timelock signature-less and eliminates the first P2SG output in the settlement transaction while precluding a premature spend in an update transaction. Eliminating the second Singleton output, however, would require a modification to [[bip-0446.md|OP_TEMPLATEHASH]] or a new opcode that allows the settlement hash to commit to a sibling prevout.
 
-=== Rollup Delegation ===
+Finally, note that a Singleton output is not used in the funding transaction. This keeps cooperative channel closures indistinguishable from other P2TR spends.
 
-Singleton outputs can also improve the architecture of rollup proposals, like [https://eprint.iacr.org/2025/068 ShieldedCSV], by enabling users to non-interactively add funds through delegation.
+The primary drawback is that the funding transaction cannot commit via [[bip-0446.md|OP_TEMPLATEHASH]] to the kickoff transaction without creating a hash cycle, requiring additional interactivity at setup. To eliminate this interactivity, an entirely new opcode would be required, which is out-of-scope of this BIP.
 
-A common problem faced by proposals like ShieldedCSV is how to bridge user funds to the L2. For on-chain efficiency, L2 funds are typically held in a single UTXO, which creates state contention if multiple users try to add funds at the same time. Users must either sign a deposit each time one fails, cooperate with other users, or swap with a sophisticated liquidity provider using HTLCs. The latter is what most protocol designers suggest, but it is capital inefficient and leads to high fees for all but the smallest transfers.
+=== Non-Interactive Bridging ===
 
-Singleton outputs solve this problem by creating a stable identifier unique to the L2 that users can delegate to. Using [[bip-XXXX-op-singleton.mediawiki|OP_SINGLETON]] with [[bip-0348.md|OP_CSFS]], users can delegate their UTXO to the L2 while committing to spending conditions that the L2 must respect (e.g., via an adaptor signature). In this manner, a user can make a deposit directly to the L2 without dealing with state contention or coordination. Deposits would remain valid indefinitely, and transaction builders would compete to aggregate pending deposits and produce completed transactions, capturing a portion of the aggregate fee. This creates a competitive market for L2 inclusion and eliminates the interactivity requirements of HTLC swaps, leading to lower fees through greater capital efficiency.
+A common problem faced by proposals like [https://eprint.iacr.org/2025/068 ShieldedCSV] is how to bridge user funds to the L2. For on-chain efficiency, L2 funds are typically held in a single UTXO, which creates state contention if multiple users try to add funds at the same time. Users must either sign a deposit each time one fails, cooperate with other users, or swap with a sophisticated liquidity provider using HTLCs, which is capital inefficient and expensive for large transfers.
+
+Singleton outputs solve this problem by creating a stable identifier unique to the L2 that users can delegate to. Using [[bip-XXXX-op-singleton.md|OP_SINGLETON]] with [[bip-0348.md|OP_CSFS]], users can delegate their UTXO to the L2 while committing to spending conditions that the L2 must respect (e.g., via an adaptor signature). In this manner, a user can make a deposit directly to the L2 without dealing with state contention or coordinating with other users. Deposits would remain valid indefinitely, and transaction builders would compete to aggregate pending deposits and produce completed transactions, capturing a portion of the aggregate fee. This creates a competitive market for L2 inclusion and eliminates the interactivity requirements of HTLC swaps.
 
 == Related Work ==
 
@@ -278,7 +282,7 @@ The singleton concept has been discussed a number of times in the Bitcoin commun
 
 While recursive introspection is a viable way to enforce singleton behavior, it has several drawbacks over P2SG's approach. For one, it is considerably more expensive to implement, requiring a large witness, a complex script, and new introspection opcodes. The approach also imposes an asymmetric cost on users, where the amortized cost of interacting with the singleton could rise considerably if the parent or grandparent transactions have many more inputs or outputs than usual. The only conceivable way to eliminate this asymmetry is with a zero-knowledge proof, which adds considerable cost and complexity. Moreover, a script-based approach makes it more challenging to implement standardized introspection of the singleton identifier.
 
-[https://github.com/JohnLaw2/btc-iids/blob/main/iids14.pdf Inherited IDs] is another proposal that offers ancestor-proof capabilities. Unlike P2SG, however, the Inherited ID proposal requires nodes to store additional state outside the UTXO set and lacks support for stable identifiers.
+[https://github.com/JohnLaw2/btc-iids/blob/main/iids14.pdf Inherited IDs] is another proposal that offers ancestor-proof capabilities. Unlike P2SG, however, the Inherited ID proposal requires nodes to store additional state outside the UTXO set. This adds considerable complexity to validation and is incompatible with Utreexo. In addition, the proposal lacks support for stable identifiers, complicating usage.
 
 == Acknowledgements ==
 
